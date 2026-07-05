@@ -5,10 +5,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 
-import google.auth
-import google.auth.transport.requests as google_requests
-import requests
-
 DEFAULT_SETTINGS = {
     "business_name": "ColdReach",
     "contact_person": "",
@@ -16,9 +12,15 @@ DEFAULT_SETTINGS = {
     "contact_phone": "",
     "signature": "",
     "default_stage": "New",
-    "ai_provider": "disabled",
-    "anthropic_api_key": "",
-    "gmail_credentials_path": "",
+    "email_subject_template": "Kurze Frage zu Ihrer Website – {company_name}",
+    "email_body_template": (
+        "Hallo {company_name} Team,\n\n"
+        "mir ist aufgefallen, dass Ihre Website Verbesserungspotenzial hat "
+        "(z.B. bei Aktualität, Sicherheit oder mobiler Darstellung). "
+        "[Hier deine Nachricht einfügen]\n\n"
+        "Beste Grüße\n"
+        "{signature}"
+    ),
 }
 
 
@@ -36,126 +38,8 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
-def _get_firebase_config() -> Dict[str, str]:
-    try:
-        import streamlit as st
-    except Exception:  # pragma: no cover - streamlit may be unavailable in tests.
-        st = None
-
-    config: Dict[str, str] = {}
-    if st is not None:
-        try:
-            secrets = st.secrets.get("firebase", {}) if hasattr(st, "secrets") else {}
-            if isinstance(secrets, dict):
-                config.update(
-                    {
-                        "database_url": str(secrets.get("database_url", "")),
-                        "database_secret": str(secrets.get("database_secret", "")),
-                        "service_account_path": str(secrets.get("service_account_path", "")),
-                    }
-                )
-        except Exception:
-            pass
-
-    database_url = os.getenv("FIREBASE_DATABASE_URL", config.get("database_url", ""))
-    database_secret = os.getenv("FIREBASE_DATABASE_SECRET", config.get("database_secret", ""))
-    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", config.get("service_account_path", ""))
-    return {
-        "database_url": database_url,
-        "database_secret": database_secret,
-        "service_account_path": service_account_path,
-    }
-
-
-def _firebase_enabled() -> bool:
-    config = _get_firebase_config()
-    return bool(config.get("database_url"))
-
-
-def is_firebase_enabled() -> bool:
-    return _firebase_enabled()
-
-
-def _firebase_url(endpoint: str) -> str:
-    config = _get_firebase_config()
-    base_url = config["database_url"].rstrip("/")
-    endpoint = endpoint.lstrip("/")
-    if base_url.endswith(".json"):
-        return f"{base_url}/{endpoint}" if endpoint else base_url
-    return f"{base_url}/{endpoint}.json" if endpoint else f"{base_url}.json"
-
-
-def _firebase_request(method: str, endpoint: str, payload: Optional[Dict[str, Any]] = None) -> Any:
-    config = _get_firebase_config()
-    if not config.get("database_url"):
-        return None
-
-    headers = {}
-    if config.get("database_secret"):
-        params = {"auth": config["database_secret"]}
-    else:
-        params = None
-        if config.get("service_account_path"):
-            service_account_path = os.path.expanduser(config["service_account_path"])
-            if os.path.exists(service_account_path):
-                credentials, _ = google.auth.load_credentials_from_file(service_account_path)
-                auth_req = google_requests.Request()
-                credentials.before_request(auth_req, "GET", "https://www.googleapis.com/auth/firebase.database")
-                headers["Authorization"] = f"Bearer {credentials.token}"
-
-    if headers:
-        response = requests.request(method, _firebase_url(endpoint), params=params, headers=headers, json=payload, timeout=10)
-    else:
-        response = requests.request(method, _firebase_url(endpoint), params=params, json=payload, timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-
-def _normalize_lead_payload(lead_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if lead_data is None:
-        lead_data = {}
-
-    normalized: Dict[str, Any] = {}
-    for key in ["company_name", "email", "website", "phone", "address", "niche", "stage", "score", "notes", "metadata", "last_contact", "next_follow_up"]:
-        if key in lead_data:
-            value = lead_data.get(key)
-            if key == "metadata" and isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError:
-                    value = {}
-            normalized[key] = value
-
-    if "company_name" not in normalized and lead_data.get("name"):
-        normalized["company_name"] = lead_data.get("name")
-    if "stage" not in normalized:
-        normalized["stage"] = None
-    if "notes" not in normalized:
-        normalized["notes"] = ""
-    if "metadata" not in normalized:
-        normalized["metadata"] = {}
-    return normalized
-
-
-def _normalize_firebase_lead(lead_id: str, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        payload = {}
-    normalized = dict(payload)
-    normalized["id"] = str(lead_id)
-    if "company_name" not in normalized and "name" in normalized:
-        normalized["company_name"] = normalized["name"]
-    return normalized
-
-
 def get_lead(db_path: Optional[str] = None, lead_id: Optional[str] = None) -> Dict[str, Any]:
-    """Return a single lead with activities (local or Firebase).
-
-    lead_id: for local DB it's integer-like; for Firebase it's the string key.
-    """
-    if _firebase_enabled():
-        payload = _firebase_request("GET", f"leads/{lead_id}") or {}
-        return _normalize_firebase_lead(str(lead_id), payload)
-
+    """Return a single lead with its activities."""
     conn = _connect(db_path)
     try:
         row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
@@ -176,16 +60,6 @@ def add_activity(db_path: Optional[str] = None, lead_id: Optional[str] = None, a
     """Log an activity for a lead. Returns the created activity object."""
     now = datetime.utcnow().isoformat()
     activity = {"id": uuid.uuid4().hex, "actor": actor or "", "action": action or "", "notes": notes or "", "timestamp": now}
-
-    if _firebase_enabled():
-        # Post under leads/{lead_id}/activities
-        response = _firebase_request("POST", f"leads/{lead_id}/activities", activity)
-        activity_id = response.get("name") if isinstance(response, dict) else None
-        if activity_id:
-            activity["id"] = str(activity_id)
-        # also update lead.updated_at
-        _firebase_request("PATCH", f"leads/{lead_id}", {"updated_at": now})
-        return activity
 
     conn = _connect(db_path)
     try:
@@ -253,15 +127,6 @@ def _get_setting_row(conn: sqlite3.Connection, key: str) -> Optional[str]:
 
 
 def get_settings(db_path: Optional[str] = None) -> Dict[str, Any]:
-    if _firebase_enabled():
-        payload = _firebase_request("GET", "settings") or {}
-        if isinstance(payload, dict):
-            merged = dict(DEFAULT_SETTINGS)
-            for key, value in payload.items():
-                merged[key] = value
-            return merged
-        return dict(DEFAULT_SETTINGS)
-
     conn = _connect(db_path)
     try:
         settings = dict(DEFAULT_SETTINGS)
@@ -277,11 +142,6 @@ def get_settings(db_path: Optional[str] = None) -> Dict[str, Any]:
 def save_settings(db_path: Optional[str] = None, updates: Dict[str, Any] = None, create_missing: bool = False) -> Dict[str, Any]:
     if updates is None:
         updates = {}
-
-    if _firebase_enabled():
-        payload = {key: (value if isinstance(value, str) else json.dumps(value) if isinstance(value, (dict, list)) else str(value)) for key, value in updates.items()}
-        _firebase_request("PATCH", "settings", payload)
-        return get_settings(db_path)
 
     conn = _connect(db_path)
     try:
@@ -301,22 +161,6 @@ def save_settings(db_path: Optional[str] = None, updates: Dict[str, Any] = None,
 def upsert_lead(db_path: Optional[str] = None, lead_data: Dict[str, Any] = None) -> Dict[str, Any]:
     if lead_data is None:
         lead_data = {}
-
-    if _firebase_enabled():
-        normalized = _normalize_lead_payload(lead_data)
-        normalized.setdefault("stage", lead_data.get("stage") or DEFAULT_SETTINGS.get("default_stage", "New"))
-        normalized.setdefault("created_at", datetime.utcnow().isoformat())
-        normalized.setdefault("updated_at", datetime.utcnow().isoformat())
-        normalized.setdefault("notes", "")
-        if lead_data.get("id"):
-            response = _firebase_request("PATCH", f"leads/{lead_data['id']}", normalized)
-            return _normalize_firebase_lead(str(lead_data["id"]), response)
-
-        response = _firebase_request("POST", "leads", normalized)
-        lead_id = response.get("name") if isinstance(response, dict) else None
-        if not lead_id:
-            return normalized
-        return _normalize_firebase_lead(str(lead_id), normalized)
 
     conn = _connect(db_path)
     try:
@@ -367,12 +211,6 @@ def upsert_lead(db_path: Optional[str] = None, lead_data: Dict[str, Any] = None)
 
 
 def list_leads(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    if _firebase_enabled():
-        payload = _firebase_request("GET", "leads") or {}
-        if isinstance(payload, dict):
-            return [_normalize_firebase_lead(lead_id, lead_data) for lead_id, lead_data in payload.items()]
-        return []
-
     conn = _connect(db_path)
     try:
         rows = conn.execute("SELECT * FROM leads ORDER BY updated_at DESC, id DESC").fetchall()
@@ -382,10 +220,6 @@ def list_leads(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def update_lead_stage(db_path: Optional[str] = None, lead_id: int = None, stage: str = None) -> Dict[str, Any]:
-    if _firebase_enabled():
-        response = _firebase_request("PATCH", f"leads/{lead_id}", {"stage": stage, "updated_at": datetime.utcnow().isoformat()})
-        return _normalize_firebase_lead(str(lead_id), response)
-
     conn = _connect(db_path)
     try:
         now = datetime.utcnow().isoformat()
@@ -400,12 +234,6 @@ def update_lead_stage(db_path: Optional[str] = None, lead_id: int = None, stage:
 def update_lead_details(db_path: Optional[str] = None, lead_id: int = None, updates: Dict[str, Any] = None) -> Dict[str, Any]:
     if updates is None:
         updates = {}
-
-    if _firebase_enabled():
-        payload = dict(updates)
-        payload["updated_at"] = datetime.utcnow().isoformat()
-        response = _firebase_request("PATCH", f"leads/{lead_id}", payload)
-        return _normalize_firebase_lead(str(lead_id), response)
 
     conn = _connect(db_path)
     try:

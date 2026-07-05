@@ -11,10 +11,15 @@ ProgressCallback = Callable[[int, int, str], None]
 
 
 def dedupe_businesses(businesses: List[Business]) -> List[Business]:
+    """Drop exact re-fetches of the same OSM element (e.g. a business matched by
+    two overlapping Branche filters in one search). Dedup by raw_id rather than
+    name+address: many OSM entries lack address tags, and name-based dedup was
+    silently collapsing distinct branches of the same chain (same name, no
+    address) into a single result."""
     seen = set()
     deduped = []
     for b in businesses:
-        key = (b.name.strip().lower(), b.address.strip().lower())
+        key = (b.source, b.raw_id)
         if key in seen:
             continue
         seen.add(key)

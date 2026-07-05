@@ -9,6 +9,11 @@ from scout.config import CURRENT_YEAR_STALE_THRESHOLD, OLD_CMS_SIGNATURES
 
 COPYRIGHT_RE = re.compile(r"(?:©|\(c\)|copyright)\s*[\-:]?\s*(\d{4})", re.IGNORECASE)
 IMPRESSUM_RE = re.compile(r"impressum", re.IGNORECASE)
+EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+# Domains/suffixes that show up in scraped HTML/JS but aren't real contact addresses
+# (tracking pixels, page-builder boilerplate, retina asset names like "logo@2x.png").
+EMAIL_IGNORE_DOMAINS = ("sentry.io", "wixpress.com", "example.com", "schema.org", "w3.org", "domain.com")
+EMAIL_IGNORE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 
 
 def check_no_https(final_url: Optional[str]) -> Tuple[bool, Optional[str]]:
@@ -79,6 +84,27 @@ def check_single_page(soup: BeautifulSoup, base_url: str) -> Tuple[bool, Optiona
     return count < 3, count
 
 
+def extract_email(soup: BeautifulSoup, html: str) -> Optional[str]:
+    """Best-effort contact email lookup: prefer explicit mailto: links, then
+    fall back to scanning the raw HTML for an address, filtering out obvious
+    non-contact matches (tracking domains, "logo@2x.png" style asset names)."""
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().startswith("mailto:"):
+            candidate = href[len("mailto:"):].split("?")[0].strip()
+            if candidate:
+                return candidate
+
+    for match in EMAIL_RE.findall(html):
+        if match.lower().endswith(EMAIL_IGNORE_SUFFIXES):
+            continue
+        domain = match.split("@")[-1].lower()
+        if any(domain == d or domain.endswith("." + d) for d in EMAIL_IGNORE_DOMAINS):
+            continue
+        return match
+    return None
+
+
 def run_heuristics(html: str, final_url: str) -> Tuple[dict, dict]:
     soup = BeautifulSoup(html, "lxml")
 
@@ -96,5 +122,7 @@ def run_heuristics(html: str, final_url: str) -> Tuple[dict, dict]:
     }.items():
         signals[key] = present
         raw_values[key] = raw
+
+    raw_values["email"] = extract_email(soup, html)
 
     return signals, raw_values

@@ -16,7 +16,7 @@ SIGNAL_COLUMNS = [
     "single_page",
 ]
 
-COLUMNS = ["name", "adresse", "telefon", "website", "status", "status_detail", "score"] + SIGNAL_COLUMNS
+COLUMNS = ["name", "adresse", "telefon", "email", "website", "status", "status_detail", "score"] + SIGNAL_COLUMNS
 
 
 def build_row(business: Business, result: WebsiteCheckResult) -> dict:
@@ -24,6 +24,7 @@ def build_row(business: Business, result: WebsiteCheckResult) -> dict:
         "name": business.name,
         "adresse": business.address,
         "telefon": business.phone,
+        "email": result.raw_values.get("email"),
         "website": business.website,
         "status": result.status,
         "status_detail": result.error_detail or result.raw_values.get("detail"),

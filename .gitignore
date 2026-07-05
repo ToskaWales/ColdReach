@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
-serviceAccountKey.json
 .streamlit/secrets.toml
 *.db
 *.xlsx

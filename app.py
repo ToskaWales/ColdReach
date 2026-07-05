@@ -2,6 +2,8 @@ import os
 
 import pandas as pd
 import streamlit as st
+import json
+import urllib.parse
 
 from scout.export import build_dataframe
 from scout.manager import (
@@ -23,6 +25,35 @@ st.set_page_config(page_title="ColdReach CRM", page_icon="🔍", layout="wide")
 
 DB_PATH = os.path.join(os.getcwd(), "data", "leads.db")
 init_db(DB_PATH)
+
+# If the Streamlit secrets contain the Firebase service-account JSON, write it
+# to a local file and expose its path via environment variable so the manager
+# can load it (useful for Streamlit Cloud where files cannot be uploaded).
+firebase_secrets = {}
+try:
+    firebase_secrets = st.secrets.get("firebase", {}) if hasattr(st, "secrets") else {}
+except Exception:
+    firebase_secrets = {}
+
+service_account_path = None
+if firebase_secrets:
+    sa = firebase_secrets.get("service_account_json") or firebase_secrets.get("service_account")
+    if sa:
+        try:
+            os.makedirs(os.path.join(os.getcwd(), ".streamlit"), exist_ok=True)
+            service_account_path = os.path.join(os.getcwd(), ".streamlit", "serviceAccountKey.json")
+            # sa may be a dict or a JSON string
+            if isinstance(sa, dict):
+                with open(service_account_path, "w", encoding="utf-8") as fh:
+                    json.dump(sa, fh)
+            else:
+                # write raw text
+                with open(service_account_path, "w", encoding="utf-8") as fh:
+                    fh.write(sa)
+            os.environ["FIREBASE_SERVICE_ACCOUNT_PATH"] = service_account_path
+        except Exception:
+            service_account_path = None
+
 settings = get_settings(DB_PATH)
 
 st.title("🔍 ColdReach — CRM")
@@ -200,8 +231,18 @@ if leads:
     st.subheader("Aktivitäten / Historie")
     activities = selected_lead.get("activities") or []
     if activities:
+        # Provide simple filtering controls
+        actors = sorted({a.get("actor") or "" for a in activities})
+        actions = sorted({a.get("action") or "" for a in activities})
+        colf1, colf2 = st.columns(2)
+        with colf1:
+            selected_actors = st.multiselect("Filter nach Akteur", options=actors, default=actors)
+        with colf2:
+            selected_actions = st.multiselect("Filter nach Aktion", options=actions, default=actions)
+
+        filtered = [a for a in activities if (a.get("actor") or "") in selected_actors and (a.get("action") or "") in selected_actions]
         # show most recent first
-        act_df = pd.DataFrame(sorted(activities, key=lambda r: r.get("timestamp", ""), reverse=True))
+        act_df = pd.DataFrame(sorted(filtered, key=lambda r: r.get("timestamp", ""), reverse=True))
         st.dataframe(act_df, use_container_width=True)
     else:
         st.info("Noch keine Aktivitäten geloggt.")
@@ -224,7 +265,11 @@ if leads:
             st.success("Aktivität gespeichert.")
             st.rerun()
     if selected_lead.get("email"):
-        mailto = f"mailto:{selected_lead.get('email')}?subject=Hallo%20{selected_lead.get('company_name')}&body={settings.get('signature','')}"
+        # Build an email draft using signature and lead data
+        subject = f"Hallo {selected_lead.get('company_name') or ''}"
+        body_lines = [f"Hallo {selected_lead.get('company_name') or ''},", "", "[Hier deine Nachricht einfügen]", "", settings.get("signature", "")]
+        body = "\n".join(body_lines)
+        mailto = f"mailto:{selected_lead.get('email')}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
         st.markdown(f"[E-Mail verfassen]({mailto})")
 else:
     st.info("Noch keine Leads gespeichert.")

@@ -21,6 +21,12 @@ DEFAULT_SETTINGS = {
         "Beste Grüße\n"
         "{signature}"
     ),
+    "anthropic_api_key": "",
+    "smtp_host": "",
+    "smtp_port": "587",
+    "smtp_username": "",
+    "smtp_password": "",
+    "sender_email": "",
 }
 
 

@@ -4,7 +4,9 @@ import urllib.parse
 import pandas as pd
 import streamlit as st
 
+from scout.ai_email import generate_email_draft
 from scout.export import build_dataframe
+from scout.mailer import send_email
 from scout.manager import (
     get_settings,
     init_db,
@@ -20,6 +22,32 @@ from scout.pipeline import evaluate_businesses, find_businesses
 from scout.sources.osm import BRANCHE_TAG_MAP
 
 st.set_page_config(page_title="ColdReach CRM", page_icon="🔍", layout="wide")
+
+DEFAULT_APP_PASSWORD = "123admin"
+try:
+    _auth_secrets = st.secrets.get("auth", {}) if hasattr(st, "secrets") else {}
+except Exception:
+    _auth_secrets = {}
+APP_PASSWORD = _auth_secrets.get("password", DEFAULT_APP_PASSWORD)
+
+
+def _check_password() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🔍 ColdReach — CRM")
+    st.text_input("Passwort", type="password", key="login_password")
+    if st.button("Anmelden", type="primary"):
+        if st.session_state.get("login_password") == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Falsches Passwort.")
+    return False
+
+
+if not _check_password():
+    st.stop()
 
 DB_PATH = os.path.join(os.getcwd(), "data", "leads.db")
 init_db(DB_PATH)
@@ -291,30 +319,96 @@ with tab_crm:
                         "wenn eine Adresse auf der Website gefunden wird."
                     )
                 else:
+                    ai_draft_key = f"ai_draft_{selected_lead_id}"
+
+                    if st.button("🤖 KI-Entwurf erstellen (durchsucht die Website erneut)", width="stretch"):
+                        if not settings.get("anthropic_api_key"):
+                            st.error("Bitte zuerst einen Anthropic API-Key unter 'Einstellungen' hinterlegen.")
+                        else:
+                            with st.spinner("KI analysiert die Website und verfasst einen Entwurf ..."):
+                                try:
+                                    known_issues = []
+                                    metadata = selected_lead.get("metadata")
+                                    if isinstance(metadata, str):
+                                        import json as _json
+                                        try:
+                                            metadata = _json.loads(metadata)
+                                        except Exception:
+                                            metadata = {}
+                                    if isinstance(metadata, dict) and metadata.get("status"):
+                                        known_issues.append(str(metadata["status"]))
+                                    if selected_lead.get("notes"):
+                                        known_issues.append(selected_lead["notes"])
+
+                                    draft = generate_email_draft(
+                                        api_key=settings["anthropic_api_key"],
+                                        lead=selected_lead,
+                                        settings=settings,
+                                        known_issues=known_issues,
+                                    )
+                                    st.session_state[ai_draft_key] = draft
+                                except Exception as e:
+                                    st.error(f"KI-Entwurf fehlgeschlagen: {e}")
+
                     context = {
                         "company_name": selected_lead.get("company_name") or "",
                         "contact_person": settings.get("contact_person") or "",
                         "business_name": settings.get("business_name") or "",
                         "signature": settings.get("signature") or "",
                     }
-                    try:
-                        default_subject = settings.get("email_subject_template", "").format(**context)
-                    except Exception:
-                        default_subject = settings.get("email_subject_template", "")
-                    try:
-                        default_body = settings.get("email_body_template", "").format(**context)
-                    except Exception:
-                        default_body = settings.get("email_body_template", "")
+                    ai_draft = st.session_state.get(ai_draft_key)
+                    if ai_draft:
+                        default_subject = ai_draft["subject"]
+                        default_body = ai_draft["body"]
+                    else:
+                        try:
+                            default_subject = settings.get("email_subject_template", "").format(**context)
+                        except Exception:
+                            default_subject = settings.get("email_subject_template", "")
+                        try:
+                            default_body = settings.get("email_body_template", "").format(**context)
+                        except Exception:
+                            default_body = settings.get("email_body_template", "")
 
                     st.caption(f"An: {selected_lead.get('email')}")
                     subject = st.text_input("Betreff", value=default_subject, key=f"subject_{selected_lead_id}")
                     body = st.text_area("Nachricht", value=default_body, height=220, key=f"body_{selected_lead_id}")
 
                     mailto = f"mailto:{selected_lead.get('email')}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
-                    btn_col1, btn_col2 = st.columns(2)
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
                     with btn_col1:
-                        st.link_button("📧 E-Mail-Client öffnen", mailto, width="stretch")
+                        smtp_ready = bool(
+                            settings.get("smtp_host") and settings.get("smtp_username")
+                            and settings.get("smtp_password") and (settings.get("sender_email") or settings.get("contact_email"))
+                        )
+                        if st.button("📤 Senden", type="primary", width="stretch", disabled=not smtp_ready):
+                            try:
+                                send_email(
+                                    smtp_host=settings["smtp_host"],
+                                    smtp_port=int(settings.get("smtp_port") or 587),
+                                    username=settings["smtp_username"],
+                                    password=settings["smtp_password"],
+                                    sender=settings.get("sender_email") or settings.get("contact_email"),
+                                    to=selected_lead["email"],
+                                    subject=subject,
+                                    body=body,
+                                )
+                                update_lead_stage(DB_PATH, selected_lead_id, "Sent")
+                                add_activity(
+                                    DB_PATH, selected_lead_id,
+                                    actor=settings.get("contact_person") or "Ich",
+                                    action="Email Sent",
+                                    notes=subject,
+                                )
+                                st.success("E-Mail versendet.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Versand fehlgeschlagen: {e}")
+                        if not smtp_ready:
+                            st.caption("SMTP-Zugangsdaten fehlen (siehe Einstellungen).")
                     with btn_col2:
+                        st.link_button("📧 E-Mail-Client öffnen", mailto, width="stretch")
+                    with btn_col3:
                         if st.button("Als 'Email Drafted' markieren", width="stretch"):
                             update_lead_stage(DB_PATH, selected_lead_id, "Email Drafted")
                             add_activity(
@@ -363,9 +457,29 @@ with tab_settings:
     signature = st.text_area("Signatur", value=settings.get("signature", ""), height=120)
 
     st.subheader("E-Mail-Vorlage")
-    st.caption("Platzhalter: {company_name}, {contact_person}, {business_name}, {signature}")
+    st.caption("Platzhalter: {company_name}, {contact_person}, {business_name}, {signature}. Wird verwendet, wenn kein KI-Entwurf erstellt wurde.")
     email_subject_template = st.text_input("Betreff-Vorlage", value=settings.get("email_subject_template", ""))
     email_body_template = st.text_area("Nachrichten-Vorlage", value=settings.get("email_body_template", ""), height=200)
+
+    st.subheader("KI-Entwürfe")
+    st.caption("Wird verwendet, um automatisch personalisierte E-Mail-Entwürfe zu verfassen (analysiert dafür die Website erneut).")
+    anthropic_api_key = st.text_input(
+        "Anthropic API-Key", value=settings.get("anthropic_api_key", ""), type="password"
+    )
+
+    st.subheader("E-Mail-Versand (SMTP)")
+    st.caption("Zugangsdaten, damit E-Mails direkt aus ColdReach per Knopfdruck verschickt werden können.")
+    smtp_col1, smtp_col2 = st.columns(2)
+    with smtp_col1:
+        smtp_host = st.text_input("SMTP-Server", value=settings.get("smtp_host", ""), placeholder="smtp.gmail.com")
+        smtp_username = st.text_input("SMTP-Benutzername", value=settings.get("smtp_username", ""))
+        sender_email = st.text_input(
+            "Absenderadresse", value=settings.get("sender_email", ""),
+            placeholder="Standard: E-Mail oben",
+        )
+    with smtp_col2:
+        smtp_port = st.text_input("SMTP-Port", value=settings.get("smtp_port", "587"))
+        smtp_password = st.text_input("SMTP-Passwort", value=settings.get("smtp_password", ""), type="password")
 
     if st.button("Einstellungen speichern", type="primary"):
         save_settings(
@@ -378,6 +492,12 @@ with tab_settings:
                 "signature": signature,
                 "email_subject_template": email_subject_template,
                 "email_body_template": email_body_template,
+                "anthropic_api_key": anthropic_api_key,
+                "smtp_host": smtp_host,
+                "smtp_port": smtp_port,
+                "smtp_username": smtp_username,
+                "smtp_password": smtp_password,
+                "sender_email": sender_email,
             },
         )
         st.success("Einstellungen gespeichert.")

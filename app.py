@@ -4,7 +4,18 @@ import pandas as pd
 import streamlit as st
 
 from scout.export import build_dataframe
-from scout.manager import get_settings, init_db, list_leads, save_settings, upsert_lead, update_lead_details
+from scout.manager import (
+    get_settings,
+    init_db,
+    is_firebase_enabled,
+    list_leads,
+    get_lead,
+    add_activity,
+    save_settings,
+    upsert_lead,
+    update_lead_details,
+    update_lead_stage,
+)
 from scout.pipeline import evaluate_businesses, find_businesses
 from scout.sources.osm import BRANCHE_TAG_MAP
 
@@ -15,7 +26,12 @@ init_db(DB_PATH)
 settings = get_settings(DB_PATH)
 
 st.title("🔍 ColdReach — CRM")
-st.caption("Finde lokale Unternehmen, prüfe deren Website und pflege sie direkt als Leads in einer lokalen CRM-Datenbank.")
+st.caption("Finde lokale Unternehmen, prüfe deren Website und pflege sie direkt als Leads in einer Firebase-basierten CRM-Datenbank.")
+
+if is_firebase_enabled():
+    st.success("Firebase-Datenbank verbunden. Leads und Status werden dort gespeichert.")
+else:
+    st.info("Firebase ist noch nicht konfiguriert. Die App läuft dann weiter lokal mit SQLite.")
 
 if "rows" not in st.session_state:
     st.session_state.rows = None
@@ -129,11 +145,18 @@ st.subheader("CRM-Übersicht")
 leads = list_leads(DB_PATH)
 if leads:
     lead_df = pd.DataFrame(leads)
-    st.dataframe(
-        lead_df[["company_name", "website", "stage", "score", "updated_at", "next_follow_up"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    selected_stage_filter = st.selectbox("Status filtern", options=["Alle", *stage_options])
+    if selected_stage_filter != "Alle":
+        lead_df = lead_df[lead_df["stage"] == selected_stage_filter]
+
+    if lead_df.empty:
+        st.info("Keine Leads für diesen Status vorhanden.")
+    else:
+        st.dataframe(
+            lead_df[["company_name", "website", "stage", "score", "updated_at", "next_follow_up"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
     lead_options = [(lead["id"], lead["company_name"] or f"Lead {lead['id']}") for lead in leads]
     selected_lead_id = st.selectbox(
@@ -141,7 +164,7 @@ if leads:
         options=[lead_id for lead_id, _ in lead_options],
         format_func=lambda lead_id: next(name for current_id, name in lead_options if current_id == lead_id),
     )
-    selected_lead = next(lead for lead in leads if lead["id"] == selected_lead_id)
+    selected_lead = get_lead(DB_PATH, selected_lead_id)
 
     with st.form("lead_editor"):
         company_name = st.text_input("Unternehmen", value=selected_lead.get("company_name") or "")
@@ -173,6 +196,36 @@ if leads:
             )
             st.success("Lead aktualisiert.")
             st.rerun()
+    st.markdown("---")
+    st.subheader("Aktivitäten / Historie")
+    activities = selected_lead.get("activities") or []
+    if activities:
+        # show most recent first
+        act_df = pd.DataFrame(sorted(activities, key=lambda r: r.get("timestamp", ""), reverse=True))
+        st.dataframe(act_df, use_container_width=True)
+    else:
+        st.info("Noch keine Aktivitäten geloggt.")
+
+    st.subheader("Neue Aktivität hinzufügen")
+    with st.form("activity_form"):
+        actor = settings.get("contact_person") or "Ich"
+        st.write(f"Als: **{actor}**")
+        action_type = st.selectbox("Aktion", options=["Email Sent", "Call", "Note", "Meeting", "Stage Change", "Other"])
+        action_notes = st.text_area("Notizen")
+        change_stage = None
+        if action_type == "Stage Change":
+            change_stage = st.selectbox("Neue Stage", options=stage_options, index=0)
+        activity_submit = st.form_submit_button("Aktivität speichern")
+
+        if activity_submit:
+            add_activity(DB_PATH, selected_lead_id, actor=actor, action=action_type, notes=action_notes)
+            if change_stage:
+                update_lead_stage(DB_PATH, selected_lead_id, change_stage)
+            st.success("Aktivität gespeichert.")
+            st.rerun()
+    if selected_lead.get("email"):
+        mailto = f"mailto:{selected_lead.get('email')}?subject=Hallo%20{selected_lead.get('company_name')}&body={settings.get('signature','')}"
+        st.markdown(f"[E-Mail verfassen]({mailto})")
 else:
     st.info("Noch keine Leads gespeichert.")
 

@@ -5,6 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 
+LEAD_EDITABLE_COLUMNS = {
+    "company_name", "email", "website", "phone", "address", "niche", "stage",
+    "score", "notes", "metadata", "last_contact", "next_follow_up",
+    "activities", "draft_subject", "draft_body",
+}
+
 DEFAULT_SETTINGS = {
     "business_name": "ColdReach",
     "contact_person": "",
@@ -259,7 +265,7 @@ def update_lead_details(db_path: Optional[str] = None, lead_id: int = None, upda
         fields = []
         values = []
         for key, value in updates.items():
-            if key in {"id"}:
+            if key not in LEAD_EDITABLE_COLUMNS:
                 continue
             fields.append(f"{key} = ?")
             values.append(value)

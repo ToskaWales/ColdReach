@@ -67,6 +67,7 @@ for _lead_id in st.session_state.pop("_pending_draft_refresh", set()):
     st.session_state.pop(f"body_{_lead_id}", None)
 
 STAGE_OPTIONS = ["New", "Analyzed", "Email Drafted", "Sent", "Replied", "Demo Call", "Won", "Lost"]
+CONTACTED_STAGES = {"Email Drafted", "Sent", "Replied", "Demo Call", "Won", "Lost"}
 STAGE_BADGES = {
     "New": "🔵 New",
     "Analyzed": "🟣 Analyzed",
@@ -458,6 +459,11 @@ with tab_crm:
             check_min_score = st.slider(
                 "KI-Entwurf erstellen für Leads mit (neu geprüftem) Score ≥", 0, 100, 60, key="check_min_score",
             )
+            check_only_uncontacted = st.checkbox(
+                "Nur Leads, die noch nicht kontaktiert wurden", value=True, key="check_only_uncontacted",
+                help="Überspringt Leads mit Stage 'Email Drafted', 'Sent', 'Replied', 'Demo Call', 'Won' oder "
+                "'Lost' komplett, statt ihre Website erneut zu prüfen und einen neuen Entwurf zu erstellen.",
+            )
             check_ready = bool(settings.get("anthropic_api_key"))
             if not check_ready:
                 st.caption("⚠️ Anthropic API-Key muss zuerst unter 'Einstellungen' hinterlegt werden.")
@@ -466,11 +472,16 @@ with tab_crm:
                 "🔎🤖 Leads prüfen & Entwürfe erstellen", type="primary",
                 disabled=not (check_ready and leads),
             ):
+                check_targets = [
+                    lead for lead in leads
+                    if not check_only_uncontacted or lead.get("stage") not in CONTACTED_STAGES
+                ]
+                skipped_contacted = len(leads) - len(check_targets)
                 progress = st.progress(0, text="Starte Prüfung ...")
                 fetcher = WebsiteFetcher()
                 drafted, skipped_no_email, errors = [], [], []
-                for i, lead in enumerate(leads, start=1):
-                    progress.progress(i / len(leads), text=f"{i}/{len(leads)}: {lead.get('company_name')}")
+                for i, lead in enumerate(check_targets, start=1):
+                    progress.progress(i / len(check_targets), text=f"{i}/{len(check_targets)}: {lead.get('company_name')}")
                     try:
                         business = Business(
                             name=lead.get("company_name") or "",
@@ -521,7 +532,9 @@ with tab_crm:
                     except Exception as e:
                         errors.append(f"{lead.get('company_name')}: {e}")
                 progress.empty()
-                st.success(f"{len(leads)} Lead(s) geprüft.")
+                st.success(f"{len(check_targets)} Lead(s) geprüft.")
+                if skipped_contacted:
+                    st.info(f"{skipped_contacted} bereits kontaktierte(s) Lead(s) übersprungen.")
                 if drafted:
                     st.success(f"{len(drafted)} KI-Entwurf/Entwürfe erstellt: " + ", ".join(drafted))
                 if skipped_no_email:
@@ -542,14 +555,12 @@ with tab_crm:
                 "Nur Leads, die noch nicht kontaktiert wurden", value=True, key="bulk_only_uncontacted",
                 help="Blendet Leads mit Stage 'Email Drafted', 'Sent', 'Replied', 'Demo Call', 'Won' oder 'Lost' aus.",
             )
-            contacted_stages = {"Email Drafted", "Sent", "Replied", "Demo Call", "Won", "Lost"}
-
             bulk_candidates = [
                 lead for lead in leads
                 if lead.get("email")
                 and lead.get("score") is not None
                 and lead["score"] >= bulk_min_score
-                and (not only_uncontacted or lead.get("stage") not in contacted_stages)
+                and (not only_uncontacted or lead.get("stage") not in CONTACTED_STAGES)
             ]
 
             st.write(f"**{len(bulk_candidates)} Lead(s)** erfüllen die Kriterien und haben eine E-Mail-Adresse hinterlegt.")

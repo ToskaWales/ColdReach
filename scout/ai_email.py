@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 from scout.fetcher import WebsiteFetcher
 
-MODEL_ID = "claude-opus-4-8"
+MODEL_ID = "claude-sonnet-5"
 MAX_PAGE_CHARS = 6000
 
 DRAFT_SCHEMA = {

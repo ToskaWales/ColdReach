@@ -36,3 +36,20 @@ def test_manager_persists_settings_and_leads(tmp_path):
     rows = list_leads(str(db_path))
     assert rows[0]["notes"] == "Follow-up planned"
     assert rows[0]["score"] == 88
+
+
+def test_init_db_does_not_wipe_saved_settings_on_restart(tmp_path):
+    """init_db() runs on every app start and re-seeds defaults via
+    create_missing=True; it must not clobber values the user already saved
+    (API keys, SMTP creds, ...) with the blank defaults."""
+    db_path = tmp_path / "leads.db"
+    init_db(str(db_path))
+
+    save_settings(str(db_path), {"anthropic_api_key": "sk-ant-secret", "smtp_host": "smtp.gmail.com"})
+
+    # Simulate the app restarting: init_db() runs again on the same file.
+    init_db(str(db_path))
+
+    settings = get_settings(str(db_path))
+    assert settings["anthropic_api_key"] == "sk-ant-secret"
+    assert settings["smtp_host"] == "smtp.gmail.com"

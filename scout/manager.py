@@ -155,10 +155,19 @@ def save_settings(db_path: Optional[str] = None, updates: Dict[str, Any] = None,
         for key, value in updates.items():
             if not isinstance(value, str):
                 value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
-            conn.execute(
-                "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, value),
-            )
+            if create_missing:
+                # Seed a default only if nothing is stored yet — used by init_db() on every
+                # app start. Without this guard it would upsert-overwrite every saved
+                # setting (API keys, SMTP creds, ...) back to its blank default each restart.
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
+                    (key, value),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
         conn.commit()
         return get_settings(db_path)
     finally:

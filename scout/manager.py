@@ -120,6 +120,8 @@ def init_db(db_path: Optional[str] = None) -> None:
         _ensure_column(conn, "leads", "last_contact", "last_contact TEXT")
         _ensure_column(conn, "leads", "next_follow_up", "next_follow_up TEXT")
         _ensure_column(conn, "leads", "activities", "activities TEXT")
+        _ensure_column(conn, "leads", "draft_subject", "draft_subject TEXT")
+        _ensure_column(conn, "leads", "draft_body", "draft_body TEXT")
         conn.commit()
     finally:
         conn.close()

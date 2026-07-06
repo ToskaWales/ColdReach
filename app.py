@@ -6,6 +6,7 @@ import streamlit as st
 
 from scout.ai_email import generate_email_draft
 from scout.export import build_dataframe
+from scout.fetcher import WebsiteFetcher
 from scout.mailer import send_email
 from scout.manager import (
     get_settings,
@@ -18,7 +19,9 @@ from scout.manager import (
     update_lead_details,
     update_lead_stage,
 )
+from scout.models import Business
 from scout.pipeline import evaluate_businesses, find_businesses
+from scout.scoring import evaluate_business
 from scout.sources.osm import BRANCHE_TAG_MAP
 
 st.set_page_config(page_title="ColdReach CRM", page_icon="🔍", layout="wide")
@@ -53,6 +56,15 @@ DB_PATH = os.path.join(os.getcwd(), "data", "leads.db")
 init_db(DB_PATH)
 
 settings = get_settings(DB_PATH)
+
+# A freshly (re-)generated AI draft is persisted to the DB, but the Betreff/Nachricht
+# widgets below are keyed per lead and — once a key exists in session_state — Streamlit
+# ignores their `value=` argument on every future rerun. Widget state can only be reset
+# by touching session_state *before* that widget renders in a given run, so draft
+# generation just queues the lead id here; this runs first, before any tab/widget code.
+for _lead_id in st.session_state.pop("_pending_draft_refresh", set()):
+    st.session_state.pop(f"subject_{_lead_id}", None)
+    st.session_state.pop(f"body_{_lead_id}", None)
 
 STAGE_OPTIONS = ["New", "Analyzed", "Email Drafted", "Sent", "Replied", "Demo Call", "Won", "Lost"]
 STAGE_BADGES = {
@@ -329,8 +341,6 @@ with tab_crm:
                         "wenn eine Adresse auf der Website gefunden wird."
                     )
                 else:
-                    ai_draft_key = f"ai_draft_{selected_lead_id}"
-
                     if st.button("🤖 KI-Entwurf erstellen (durchsucht die Website erneut)", width="stretch"):
                         if not settings.get("anthropic_api_key"):
                             st.error("Bitte zuerst einen Anthropic API-Key unter 'Einstellungen' hinterlegen.")
@@ -356,7 +366,12 @@ with tab_crm:
                                         settings=settings,
                                         known_issues=known_issues,
                                     )
-                                    st.session_state[ai_draft_key] = draft
+                                    update_lead_details(
+                                        DB_PATH, selected_lead_id,
+                                        {"draft_subject": draft["subject"], "draft_body": draft["body"]},
+                                    )
+                                    st.session_state.setdefault("_pending_draft_refresh", set()).add(selected_lead_id)
+                                    st.rerun()
                                 except Exception as e:
                                     st.error(f"KI-Entwurf fehlgeschlagen: {e}")
 
@@ -366,10 +381,9 @@ with tab_crm:
                         "business_name": settings.get("business_name") or "",
                         "signature": settings.get("signature") or "",
                     }
-                    ai_draft = st.session_state.get(ai_draft_key)
-                    if ai_draft:
-                        default_subject = ai_draft["subject"]
-                        default_body = ai_draft["body"]
+                    if selected_lead.get("draft_subject") and selected_lead.get("draft_body"):
+                        default_subject = selected_lead["draft_subject"]
+                        default_body = selected_lead["draft_body"]
                     else:
                         try:
                             default_subject = settings.get("email_subject_template", "").format(**context)
@@ -431,10 +445,88 @@ with tab_crm:
                             st.rerun()
 
         st.divider()
+        with st.expander("🔎🤖 Alle Leads prüfen & KI-Entwürfe vorbereiten"):
+            st.caption(
+                "Prüft für jeden Lead die hinterlegte Website erneut (erreichbar? aktuell? Score) und "
+                "aktualisiert Score/Notizen entsprechend. Für Leads mit schwacher oder fehlender Website "
+                "wird automatisch ein KI-Entwurf erstellt — es wird dabei nichts verschickt. Die Entwürfe "
+                "erscheinen danach im Tab 'E-Mail-Entwurf' des jeweiligen Leads, sodass du sie dir ansehen "
+                "und bei Bedarf mit einem Klick verschicken kannst."
+            )
+            check_min_score = st.slider(
+                "KI-Entwurf erstellen für Leads mit (neu geprüftem) Score ≥", 0, 100, 60, key="check_min_score",
+            )
+            check_ready = bool(settings.get("anthropic_api_key"))
+            if not check_ready:
+                st.caption("⚠️ Anthropic API-Key muss zuerst unter 'Einstellungen' hinterlegt werden.")
+
+            if st.button(
+                "🔎🤖 Leads prüfen & Entwürfe erstellen", type="primary",
+                disabled=not (check_ready and leads),
+            ):
+                progress = st.progress(0, text="Starte Prüfung ...")
+                fetcher = WebsiteFetcher()
+                drafted, skipped_no_email, errors = [], [], []
+                for i, lead in enumerate(leads, start=1):
+                    progress.progress(i / len(leads), text=f"{i}/{len(leads)}: {lead.get('company_name')}")
+                    try:
+                        business = Business(
+                            name=lead.get("company_name") or "",
+                            address=lead.get("address") or "",
+                            phone=lead.get("phone"),
+                            website=lead.get("website"),
+                            source="crm",
+                            raw_id=str(lead["id"]),
+                        )
+                        result = evaluate_business(business, fetcher)
+
+                        detail = result.error_detail or result.raw_values.get("detail")
+                        lead_updates = {"score": result.score}
+                        if detail:
+                            lead_updates["notes"] = detail
+
+                        current_email = lead.get("email")
+                        found_email = result.raw_values.get("email")
+                        if found_email and not current_email:
+                            lead_updates["email"] = found_email
+                            current_email = found_email
+                        update_lead_details(DB_PATH, lead["id"], lead_updates)
+
+                        score = result.score if result.score is not None else 0
+                        if score >= check_min_score:
+                            if not current_email:
+                                skipped_no_email.append(lead.get("company_name"))
+                                continue
+                            draft = generate_email_draft(
+                                api_key=settings["anthropic_api_key"],
+                                lead={**lead, "email": current_email},
+                                settings=settings,
+                                known_issues=[detail] if detail else None,
+                            )
+                            update_lead_details(
+                                DB_PATH, lead["id"],
+                                {"draft_subject": draft["subject"], "draft_body": draft["body"]},
+                            )
+                            st.session_state.setdefault("_pending_draft_refresh", set()).add(lead["id"])
+                            drafted.append(lead.get("company_name"))
+                    except Exception as e:
+                        errors.append(f"{lead.get('company_name')}: {e}")
+                progress.empty()
+                st.success(f"{len(leads)} Lead(s) geprüft.")
+                if drafted:
+                    st.success(f"{len(drafted)} KI-Entwurf/Entwürfe erstellt: " + ", ".join(drafted))
+                if skipped_no_email:
+                    st.warning(f"{len(skipped_no_email)} ohne E-Mail-Adresse übersprungen: " + ", ".join(skipped_no_email))
+                if errors:
+                    st.error(f"{len(errors)} fehlgeschlagen:\n" + "\n".join(errors))
+                st.rerun()
+
+        st.divider()
         with st.expander("🚀 Bulk-Versand: KI-E-Mails an mehrere Leads"):
             st.caption(
-                "Erstellt für jeden passenden Lead automatisch einen personalisierten KI-Entwurf "
-                "(analysiert dafür jede Website erneut) und verschickt ihn direkt per SMTP."
+                "Verschickt für jeden passenden Lead eine E-Mail per SMTP — nutzt einen bereits "
+                "vorbereiteten KI-Entwurf (siehe 'Leads prüfen & Entwürfe vorbereiten' oben), oder "
+                "erstellt spontan einen neuen, falls noch keiner vorliegt."
             )
             bulk_min_score = st.slider("Nur Leads mit Score ≥", 0, 100, 60, key="bulk_min_score")
             only_uncontacted = st.checkbox(
@@ -480,12 +572,15 @@ with tab_crm:
                 for i, lead in enumerate(bulk_candidates, start=1):
                     progress.progress(i / len(bulk_candidates), text=f"{i}/{len(bulk_candidates)}: {lead.get('company_name')}")
                     try:
-                        draft = generate_email_draft(
-                            api_key=settings["anthropic_api_key"],
-                            lead=lead,
-                            settings=settings,
-                            known_issues=[lead["notes"]] if lead.get("notes") else None,
-                        )
+                        if lead.get("draft_subject") and lead.get("draft_body"):
+                            draft = {"subject": lead["draft_subject"], "body": lead["draft_body"]}
+                        else:
+                            draft = generate_email_draft(
+                                api_key=settings["anthropic_api_key"],
+                                lead=lead,
+                                settings=settings,
+                                known_issues=[lead["notes"]] if lead.get("notes") else None,
+                            )
                         send_email(
                             smtp_host=settings["smtp_host"],
                             smtp_port=int(settings.get("smtp_port") or 587),

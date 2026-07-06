@@ -1,5 +1,5 @@
 import re
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from scout.errors import format_error_details
 from scout.export import IncrementalCSVWriter, build_row
@@ -17,6 +17,21 @@ def _normalize(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
+def _name_key(name: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]", "", _normalize(name))
+
+
+def _addresses_match(a: str, b: str) -> bool:
+    """Loose containment match rather than equality: OSM composes addresses as
+    "Street 12, 12345 City" while Google's formatted_address for the same
+    place is usually "Street 12, 12345 City, Deutschland" (plus other minor
+    formatting differences) — an exact-equality check almost never merges
+    the same real-world business found via both sources."""
+    if not a or not b:
+        return False
+    return a in b or b in a
+
+
 def dedupe_businesses(businesses: List[Business]) -> List[Business]:
     """Drop exact re-fetches of the same element (e.g. a business matched by
     two overlapping Branche filters, or returned by two different sources).
@@ -25,31 +40,35 @@ def dedupe_businesses(businesses: List[Business]) -> List[Business]:
     branches of the same chain (same name, no address) into a single result.
 
     Additionally, merge cross-source duplicates of the same real-world
-    business (matching name + non-empty address) so a website/phone missing
-    from one source (commonly OSM) can be filled in by another (e.g. Google
-    Places) instead of creating a second, incomplete lead."""
+    business (matching name + overlapping non-empty address) so a
+    website/phone missing from one source (commonly OSM) can be filled in by
+    another (e.g. Google Places) instead of creating a second, incomplete
+    lead that looks like it has "no website" when it really does."""
     seen_ids = set()
-    by_fingerprint: Dict[Tuple[str, str], Business] = {}
-    deduped: List[Business] = []
+    kept: List[Business] = []
     for b in businesses:
         id_key = (b.source, b.raw_id)
         if id_key in seen_ids:
             continue
         seen_ids.add(id_key)
 
+        name_key = _name_key(b.name)
         address_key = _normalize(b.address)
-        fingerprint = (re.sub(r"[^a-z0-9]", "", _normalize(b.name)), address_key) if address_key else None
 
-        existing = by_fingerprint.get(fingerprint) if fingerprint else None
-        if existing is not None:
-            existing.website = existing.website or b.website
-            existing.phone = existing.phone or b.phone
+        match = None
+        if address_key:
+            for existing in kept:
+                if _name_key(existing.name) == name_key and _addresses_match(address_key, _normalize(existing.address)):
+                    match = existing
+                    break
+
+        if match is not None:
+            match.website = match.website or b.website
+            match.phone = match.phone or b.phone
             continue
 
-        if fingerprint:
-            by_fingerprint[fingerprint] = b
-        deduped.append(b)
-    return deduped
+        kept.append(b)
+    return kept
 
 
 def find_businesses(

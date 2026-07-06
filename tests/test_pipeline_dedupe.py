@@ -41,3 +41,32 @@ def test_distinct_chain_branches_without_address_are_not_dropped():
     result = dedupe_businesses([branch_a, branch_b])
 
     assert len(result) == 2
+
+
+def test_google_address_suffix_still_merges_with_osm():
+    """Regression test: Google's formatted_address usually appends the
+    country (", Deutschland") to what OSM composes, so an exact-equality
+    address match never merges the same business — leaving the OSM copy
+    (often missing a website) as its own lead that looks like it has none."""
+    osm = _business(
+        name="Friseur Schmidt", address="Ludwigstraße 12, 95444 Bayreuth",
+        website=None, source="osm", raw_id="node/1",
+    )
+    google = _business(
+        name="Friseur Schmidt", address="Ludwigstraße 12, 95444 Bayreuth, Deutschland",
+        website="https://friseur-schmidt.de", source="google_places", raw_id="place_abc",
+    )
+
+    result = dedupe_businesses([osm, google])
+
+    assert len(result) == 1
+    assert result[0].website == "https://friseur-schmidt.de"
+
+
+def test_same_name_different_address_not_merged():
+    branch_a = _business(name="Rossmann", address="Hauptstraße 1, 95444 Bayreuth", website=None, source="osm", raw_id="node/1")
+    branch_b = _business(name="Rossmann", address="Bahnhofstraße 9, 95444 Bayreuth", website=None, source="osm", raw_id="node/2")
+
+    result = dedupe_businesses([branch_a, branch_b])
+
+    assert len(result) == 2

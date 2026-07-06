@@ -447,11 +447,13 @@ with tab_crm:
         st.divider()
         with st.expander("🔎🤖 Alle Leads prüfen & KI-Entwürfe vorbereiten"):
             st.caption(
-                "Prüft für jeden Lead die hinterlegte Website erneut (erreichbar? aktuell? Score) und "
-                "aktualisiert Score/Notizen entsprechend. Für Leads mit schwacher oder fehlender Website "
-                "wird automatisch ein KI-Entwurf erstellt — es wird dabei nichts verschickt. Die Entwürfe "
-                "erscheinen danach im Tab 'E-Mail-Entwurf' des jeweiligen Leads, sodass du sie dir ansehen "
-                "und bei Bedarf mit einem Klick verschicken kannst."
+                "Prüft für jeden Lead die hinterlegte Website erneut (erreichbar? aktuell? Score), "
+                "durchsucht die Seite nach einer Kontakt-E-Mail (sofern noch keine hinterlegt ist) und "
+                "aktualisiert Score/Notizen/E-Mail entsprechend. Für Leads mit schwacher oder fehlender "
+                "Website wird automatisch ein KI-Entwurf erstellt und die Stage auf 'Email Drafted' "
+                "gesetzt — es wird dabei nichts verschickt. Die Entwürfe erscheinen danach im Tab "
+                "'E-Mail-Entwurf' des jeweiligen Leads, sodass du sie dir ansehen und bei Bedarf mit "
+                "einem Klick verschicken kannst."
             )
             check_min_score = st.slider(
                 "KI-Entwurf erstellen für Leads mit (neu geprüftem) Score ≥", 0, 100, 60, key="check_min_score",
@@ -506,6 +508,13 @@ with tab_crm:
                             update_lead_details(
                                 DB_PATH, lead["id"],
                                 {"draft_subject": draft["subject"], "draft_body": draft["body"]},
+                            )
+                            update_lead_stage(DB_PATH, lead["id"], "Email Drafted")
+                            add_activity(
+                                DB_PATH, lead["id"],
+                                actor=settings.get("contact_person") or "Ich",
+                                action="Note",
+                                notes="Email-Entwurf erstellt.",
                             )
                             st.session_state.setdefault("_pending_draft_refresh", set()).add(lead["id"])
                             drafted.append(lead.get("company_name"))

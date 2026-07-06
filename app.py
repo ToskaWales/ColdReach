@@ -4,7 +4,7 @@ import urllib.parse
 import pandas as pd
 import streamlit as st
 
-from scout.ai_email import generate_email_draft
+from scout.ai_email import find_website, generate_email_draft
 from scout.export import build_dataframe
 from scout.fetcher import WebsiteFetcher
 from scout.mailer import send_email
@@ -448,13 +448,14 @@ with tab_crm:
         st.divider()
         with st.expander("🔎🤖 Alle Leads prüfen & KI-Entwürfe vorbereiten"):
             st.caption(
-                "Prüft für jeden Lead die hinterlegte Website erneut (erreichbar? aktuell? Score), "
-                "durchsucht die Seite nach einer Kontakt-E-Mail (sofern noch keine hinterlegt ist) und "
-                "aktualisiert Score/Notizen/E-Mail entsprechend. Für Leads mit schwacher oder fehlender "
-                "Website wird automatisch ein KI-Entwurf erstellt und die Stage auf 'Email Drafted' "
-                "gesetzt — es wird dabei nichts verschickt. Die Entwürfe erscheinen danach im Tab "
-                "'E-Mail-Entwurf' des jeweiligen Leads, sodass du sie dir ansehen und bei Bedarf mit "
-                "einem Klick verschicken kannst."
+                "Sucht für Leads ohne hinterlegte Website per KI-Websuche nach der offiziellen Seite der "
+                "Firma, prüft für jeden Lead die (neue oder bereits hinterlegte) Website erneut (erreichbar? "
+                "aktuell? Score), durchsucht die Seite nach einer Kontakt-E-Mail (sofern noch keine "
+                "hinterlegt ist) und aktualisiert Website/Score/Notizen/E-Mail entsprechend. Für Leads mit "
+                "schwacher oder fehlender Website wird automatisch ein KI-Entwurf erstellt und die Stage "
+                "auf 'Email Drafted' gesetzt — es wird dabei nichts verschickt. Die Entwürfe erscheinen "
+                "danach im Tab 'E-Mail-Entwurf' des jeweiligen Leads, sodass du sie dir ansehen und bei "
+                "Bedarf mit einem Klick verschicken kannst."
             )
             check_min_score = st.slider(
                 "KI-Entwurf erstellen für Leads mit (neu geprüftem) Score ≥", 0, 100, 60, key="check_min_score",
@@ -479,15 +480,23 @@ with tab_crm:
                 skipped_contacted = len(leads) - len(check_targets)
                 progress = st.progress(0, text="Starte Prüfung ...")
                 fetcher = WebsiteFetcher()
-                drafted, skipped_no_email, errors = [], [], []
+                drafted, skipped_no_email, errors, websites_found = [], [], [], []
                 for i, lead in enumerate(check_targets, start=1):
                     progress.progress(i / len(check_targets), text=f"{i}/{len(check_targets)}: {lead.get('company_name')}")
                     try:
+                        website = lead.get("website")
+                        if not website:
+                            website = find_website(
+                                api_key=settings["anthropic_api_key"],
+                                company_name=lead.get("company_name") or "",
+                                address=lead.get("address") or "",
+                            )
+
                         business = Business(
                             name=lead.get("company_name") or "",
                             address=lead.get("address") or "",
                             phone=lead.get("phone"),
-                            website=lead.get("website"),
+                            website=website,
                             source="crm",
                             raw_id=str(lead["id"]),
                         )
@@ -495,6 +504,9 @@ with tab_crm:
 
                         detail = result.error_detail or result.raw_values.get("detail")
                         lead_updates = {"score": result.score}
+                        if website and website != lead.get("website"):
+                            lead_updates["website"] = website
+                            websites_found.append(lead.get("company_name"))
                         if detail:
                             lead_updates["notes"] = detail
 
@@ -535,6 +547,8 @@ with tab_crm:
                 st.success(f"{len(check_targets)} Lead(s) geprüft.")
                 if skipped_contacted:
                     st.info(f"{skipped_contacted} bereits kontaktierte(s) Lead(s) übersprungen.")
+                if websites_found:
+                    st.success(f"{len(websites_found)} Website(s) neu gefunden: " + ", ".join(websites_found))
                 if drafted:
                     st.success(f"{len(drafted)} KI-Entwurf/Entwürfe erstellt: " + ", ".join(drafted))
                 if skipped_no_email:

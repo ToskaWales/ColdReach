@@ -29,6 +29,38 @@ def _extract_visible_text(html: str) -> str:
     return text[:MAX_PAGE_CHARS]
 
 
+def find_website(api_key: str, company_name: str, address: str = "") -> Optional[str]:
+    """Search the web for a business's official website when the CRM has none on
+    file (common with OSM-sourced leads, which often lack the `website` tag even
+    when the business has a real site)."""
+    if not company_name:
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+    query = f"Firma: {company_name}\nAdresse: {address or 'unbekannt'}"
+    response = client.messages.create(
+        model=MODEL_ID,
+        max_tokens=1024,
+        system=(
+            "Du hilfst dabei, die offizielle Website eines lokalen Unternehmens in "
+            "Deutschland zu finden. Suche im Web nach der Firma (Name + Adresse) und "
+            "antworte NUR mit der vollstaendigen URL der offiziellen Unternehmens-Website "
+            "(z.B. https://www.beispiel.de), ohne weiteren Text. Falls du keine Website mit "
+            "ausreichender Sicherheit findest (z.B. nur Branchenverzeichnisse, "
+            "Social-Media-Profile oder eine andere Firma mit aehnlichem Namen), antworte "
+            "exakt mit NONE."
+        ),
+        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
+        messages=[{"role": "user", "content": query}],
+    )
+
+    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    if not text or text.upper() == "NONE":
+        return None
+    match = re.search(r"https?://\S+", text)
+    return match.group(0).rstrip(".,;)") if match else None
+
+
 def generate_email_draft(
     api_key: str,
     lead: dict,

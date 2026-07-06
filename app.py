@@ -97,6 +97,13 @@ with tab_search:
             "Limit (0 = alle)", min_value=0, value=0, step=5,
             help="Zum Testen die Anzahl geprüfter Firmen begrenzen.",
         )
+    if settings.get("google_places_api_key"):
+        st.caption("✅ Google Places ist aktiv — Suche kombiniert OpenStreetMap- und Google-Ergebnisse.")
+    else:
+        st.caption(
+            "ℹ️ Nur OpenStreetMap wird durchsucht. Für mehr Treffer einen Google Places API-Key "
+            "unter 'Einstellungen' hinterlegen."
+        )
     start = st.button("Suche starten", type="primary")
 
     if start:
@@ -105,7 +112,10 @@ with tab_search:
         else:
             with st.spinner(f"Suche Firmen für {', '.join(branchen)} in {ort} ..."):
                 try:
-                    businesses = find_businesses(branchen, ort, int(radius))
+                    businesses = find_businesses(
+                        branchen, ort, int(radius),
+                        google_places_api_key=settings.get("google_places_api_key") or None,
+                    )
                 except Exception as e:
                     st.error(f"Fehler bei der Firmensuche: {e}")
                     businesses = []
@@ -420,6 +430,89 @@ with tab_crm:
                             st.success("Stage aktualisiert.")
                             st.rerun()
 
+        st.divider()
+        with st.expander("🚀 Bulk-Versand: KI-E-Mails an mehrere Leads"):
+            st.caption(
+                "Erstellt für jeden passenden Lead automatisch einen personalisierten KI-Entwurf "
+                "(analysiert dafür jede Website erneut) und verschickt ihn direkt per SMTP."
+            )
+            bulk_min_score = st.slider("Nur Leads mit Score ≥", 0, 100, 60, key="bulk_min_score")
+            only_uncontacted = st.checkbox(
+                "Nur Leads, die noch nicht kontaktiert wurden", value=True, key="bulk_only_uncontacted",
+                help="Blendet Leads mit Stage 'Email Drafted', 'Sent', 'Replied', 'Demo Call', 'Won' oder 'Lost' aus.",
+            )
+            contacted_stages = {"Email Drafted", "Sent", "Replied", "Demo Call", "Won", "Lost"}
+
+            bulk_candidates = [
+                lead for lead in leads
+                if lead.get("email")
+                and lead.get("score") is not None
+                and lead["score"] >= bulk_min_score
+                and (not only_uncontacted or lead.get("stage") not in contacted_stages)
+            ]
+
+            st.write(f"**{len(bulk_candidates)} Lead(s)** erfüllen die Kriterien und haben eine E-Mail-Adresse hinterlegt.")
+            if bulk_candidates:
+                st.dataframe(
+                    pd.DataFrame(bulk_candidates)[["company_name", "email", "score", "stage"]],
+                    width="stretch", hide_index=True,
+                    column_config={"company_name": "Unternehmen", "email": "E-Mail", "score": "Score", "stage": "Stage"},
+                )
+
+            bulk_ready = bool(settings.get("anthropic_api_key")) and bool(
+                settings.get("smtp_host") and settings.get("smtp_username")
+                and settings.get("smtp_password") and (settings.get("sender_email") or settings.get("contact_email"))
+            )
+            if not bulk_ready:
+                st.caption("⚠️ Anthropic API-Key und SMTP-Zugangsdaten müssen zuerst unter 'Einstellungen' hinterlegt werden.")
+
+            confirm_bulk = st.checkbox(
+                f"Ich bestätige, dass ich jetzt {len(bulk_candidates)} E-Mail(s) verschicken möchte.",
+                value=False, key="bulk_confirm", disabled=not bulk_candidates,
+            )
+
+            if st.button(
+                "🤖📤 KI-Entwürfe erstellen & senden", type="primary",
+                disabled=not (bulk_ready and bulk_candidates and confirm_bulk),
+            ):
+                progress = st.progress(0, text="Starte Bulk-Versand ...")
+                sent, failed = [], []
+                for i, lead in enumerate(bulk_candidates, start=1):
+                    progress.progress(i / len(bulk_candidates), text=f"{i}/{len(bulk_candidates)}: {lead.get('company_name')}")
+                    try:
+                        draft = generate_email_draft(
+                            api_key=settings["anthropic_api_key"],
+                            lead=lead,
+                            settings=settings,
+                            known_issues=[lead["notes"]] if lead.get("notes") else None,
+                        )
+                        send_email(
+                            smtp_host=settings["smtp_host"],
+                            smtp_port=int(settings.get("smtp_port") or 587),
+                            username=settings["smtp_username"],
+                            password=settings["smtp_password"],
+                            sender=settings.get("sender_email") or settings.get("contact_email"),
+                            to=lead["email"],
+                            subject=draft["subject"],
+                            body=draft["body"],
+                        )
+                        update_lead_stage(DB_PATH, lead["id"], "Sent")
+                        add_activity(
+                            DB_PATH, lead["id"],
+                            actor=settings.get("contact_person") or "Ich",
+                            action="Email Sent",
+                            notes=draft["subject"],
+                        )
+                        sent.append(lead.get("company_name"))
+                    except Exception as e:
+                        failed.append(f"{lead.get('company_name')}: {e}")
+                progress.empty()
+                if sent:
+                    st.success(f"{len(sent)} E-Mail(s) versendet: " + ", ".join(sent))
+                if failed:
+                    st.error(f"{len(failed)} fehlgeschlagen:\n" + "\n".join(failed))
+                st.rerun()
+
     st.divider()
     with st.expander("➕ Neuen Lead manuell anlegen"):
         with st.form("new_lead"):
@@ -467,6 +560,15 @@ with tab_settings:
         "Anthropic API-Key", value=settings.get("anthropic_api_key", ""), type="password"
     )
 
+    st.subheader("Firmensuche (Datenquellen)")
+    st.caption(
+        "Optional: Google Places ergänzt OpenStreetMap um mehr und vollständigere Treffer "
+        "(inkl. Website/Telefon), verursacht aber Kosten bei Google."
+    )
+    google_places_api_key = st.text_input(
+        "Google Places API-Key", value=settings.get("google_places_api_key", ""), type="password"
+    )
+
     st.subheader("E-Mail-Versand (SMTP)")
     st.caption("Zugangsdaten, damit E-Mails direkt aus ColdReach per Knopfdruck verschickt werden können.")
     smtp_col1, smtp_col2 = st.columns(2)
@@ -493,6 +595,7 @@ with tab_settings:
                 "email_subject_template": email_subject_template,
                 "email_body_template": email_body_template,
                 "anthropic_api_key": anthropic_api_key,
+                "google_places_api_key": google_places_api_key,
                 "smtp_host": smtp_host,
                 "smtp_port": smtp_port,
                 "smtp_username": smtp_username,

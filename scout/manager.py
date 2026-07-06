@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
         "{signature}"
     ),
     "anthropic_api_key": "",
+    "google_places_api_key": "",
     "smtp_host": "",
     "smtp_port": "587",
     "smtp_username": "",
